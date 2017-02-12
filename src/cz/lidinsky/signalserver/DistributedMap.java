@@ -1,7 +1,18 @@
 /*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
+ * Copyright (C) 2017 jilm
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 package cz.lidinsky.signalserver;
 
@@ -23,7 +34,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * This is a distributed map storage.
+ * This is a distributed map storage. There is a server side which holds the
+ * data and meet requirements of one or more clients.
  */
 public abstract class DistributedMap implements Closeable {
 
@@ -33,11 +45,14 @@ public abstract class DistributedMap implements Closeable {
    */
   public static final int DEFAULT_PORT = 12349;
 
+  /**
+   * Logger
+   */
   public static final Logger logger
           = Logger.getLogger(DistributedMap.class.getName());
 
   /**
-   * Associate given value with the given key;
+   * Associate value with the key;
    *
    * @param key
    * @param value
@@ -123,7 +138,7 @@ public abstract class DistributedMap implements Closeable {
   private static class Server extends DistributedMap {
 
     /**
-     * The storage for the data.
+     * The data storage.
      */
     private final Map<String, byte[]> map;
 
@@ -137,13 +152,21 @@ public abstract class DistributedMap implements Closeable {
      */
     private boolean stop;
 
+    /**
+     * Clients counter. It increases with each new client. Used for client
+     * identification in log messages.
+     */
     private int clientCounter;
 
     /**
-     * A set of all of the active clients;
+     * A set containing all of the active clients;
      */
     private final Set<ServerClient> clients;
 
+    /**
+     * If true, the server is runnig, if not the server was either stopped
+     * or have not been started yet.
+     */
     private boolean running;
 
     private ServerSocket serverSocket;
@@ -164,30 +187,37 @@ public abstract class DistributedMap implements Closeable {
       this.running = false;
     }
 
+    /**
+     * The server socket is opened and the server starts working in the
+     * separate thread, so this method doesn't block.
+     *
+     * @throws IOException
+     *            if the server socket could not been created
+     */
     public void start() throws IOException {
-
+      // open server socket
       serverSocket = new ServerSocket(port);
-      logger.info("Server socket has been successfuly created, going to enter the accept loop...");
-
+      logger.info(String.format("Server socket has been successfuly created;\n now it is waiting on port: %d;\n going to enter the accept loop...", port));
+      // start the accept loop in the separate thread
       serverThread = new Thread(() -> {
 
-        logger.info("Server thread has been executed...");
+        logger.info("Server thread has been started...");
         try {
           while (!stop) {
             running = true;
             Socket socket = serverSocket.accept();
-            logger.info("New client has been accepted...");
+            logger.info(String.format("New client, number %d, has been accepted;", clientCounter));
             ServerClient client = new ServerClient(socket, clientCounter++);
             new Thread(client).start();
             add(client);
           }
         } catch (IOException e) {
-          logger.severe(e.getMessage());
+          logger.severe(String.format("An exception was catched by the server accept loop!\n%s", e.getMessage()));
         } finally {
           running = false;
           Tools.close(serverSocket);
           serverSocket = null;
-          logger.info("Leaving the accept loop...");
+          logger.info("Leaving the accept loop, server was stopped...");
         }
 
       });
@@ -197,16 +227,19 @@ public abstract class DistributedMap implements Closeable {
 
     private synchronized void add(ServerClient client) {
       clients.add(client);
+      logger.info(String.format("A client has been added, number of active clients: %d", clients.size()));
     }
 
     private synchronized void remove(ServerClient client) {
       clients.remove(client);
+      logger.info(String.format("A client has been removed, number of active clients: %d", clients.size()));
     }
 
     @Override
     public synchronized void put(String key, byte[] value) {
       if (running) {
         map.put(key, value);
+        System.out.println("PUT: " + Arrays.toString(value));
       } else {
         throw new IllegalStateException();
       }
@@ -215,6 +248,7 @@ public abstract class DistributedMap implements Closeable {
     @Override
     public synchronized byte[] get(String key) {
       if (running) {
+        System.out.println("GET: " + Arrays.toString(map.get(key)));
         return map.get(key);
       } else {
         throw new IllegalStateException();
@@ -228,6 +262,9 @@ public abstract class DistributedMap implements Closeable {
 
     //---------------------------------------------- Client class implementation.
 
+    /**
+     * An object which represents a client from the server side.
+     */
     private class ServerClient implements Runnable {
 
       private final Socket socket;
@@ -253,33 +290,47 @@ public abstract class DistributedMap implements Closeable {
                 OutputStream os = socket.getOutputStream();
                 ) {
           logger.info(String.format("Client #%d: Going to enter request-response loop...", clientNumber));
+          // loop
           while (!stop) {
+            // get request from the client
             RawBinarySpinelMessage message = RawBinarySpinelMessage.read(is);
-            logger.fine("Message received");
-            System.out.println(message.toString());
+            // what the client wants?
+            System.out.println(Arrays.toString(message.getData()));
             int command = message.getData()[0];
             byte[] buffer = MessageUtils.unwrapCommand(message.getData());
+            System.out.println(Arrays.toString(message.getData()));
             switch (command) {
+
+              // he wants to get some data
               case MessageUtils.GET_INST:
+                // get the key into the map
                 String key = MessageUtils.getKey(buffer);
-                System.out.println(key);
+                // get data from the map
                 buffer = get(key);
                 if (buffer == null) {
                   MessageUtils.NO_VALUE_RESPONSE.send(os);
                 } else {
+                  // send then back to the client
                   buffer = MessageUtils.wrap(MessageUtils.ACK_OK, buffer);
                   (new RawBinarySpinelMessage(0xB0, buffer)).send(os);
                 }
                 break;
+
+              // he wants to put some data into the map
               case MessageUtils.PUT_INST:
+                // get the key into the map
                 key = MessageUtils.getKey(buffer);
+                // get the value
                 buffer = MessageUtils.unwrapKey(buffer);
-                System.out.println(key);
+                // put it into the map
                 put(key, buffer);
+                // send the ok response
                 MessageUtils.OK_RESPONSE.send(os);
                 break;
+
+              // unknown command
               default:
-                logger.warning("Unknown command!");
+                logger.warning(String.format("Unknown command: %d!", command));
                 MessageUtils.BAD_COMMAND_RESPONSE.send(os);
                 break;
             }
@@ -289,7 +340,8 @@ public abstract class DistributedMap implements Closeable {
         } catch (IOException ex) {
           logger.log(Level.SEVERE, null, ex);
         } finally {
-          logger.info("Client going down...");
+          logger.info(String.format("Client #%d going down...", clientNumber));
+          remove(this);
         }
 
       }
